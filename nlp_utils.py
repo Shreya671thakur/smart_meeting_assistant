@@ -1,108 +1,74 @@
-import requests
-import os
+from transformers import pipeline
+from sentence_transformers import SentenceTransformer
+from sklearn.cluster import KMeans
 import yake
-import numpy as np
+
+_summarizer = None
+_sentiment = None
+_embedding = None
+_generator = None
 
 
-# -----------------------------
-# Helper: Groq LLM call
-# -----------------------------
-def groq_chat(prompt, max_tokens=400):
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {os.getenv('GROQ_API_KEY')}",
-        "Content-Type": "application/json"
-    }
+def summarize_text(text: str, max_length=150):
+    global _summarizer
+    if _summarizer is None:
+        _summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
 
-    payload = {
-        "model": "llama-3.1-8b-instant",
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": max_tokens,
-        "temperature": 0.3
-    }
+    chunks = [text[i:i + 700] for i in range(0, len(text), 700)]
 
-    response = requests.post(url, json=payload, headers=headers)
-    if response.status_code != 200:
-        raise Exception("Groq LLM error: " + response.text)
+    summaries = [
+        _summarizer(c, max_length=120, min_length=30, do_sample=False)[0]["summary_text"]
+        for c in chunks
+    ]
 
-    return response.json()["choices"][0]["message"]["content"]
+    final = " ".join(summaries)
+    return final[:max_length * 5]  # safe max length
 
 
-# -----------------------------
-# 1. SUMMARIZATION
-# -----------------------------
-def summarize_text(text: str, max_length: int = 150):
-    prompt = f"""
-Summarize the following meeting text in {max_length} words.
-Focus on decisions, action items, and key discussion points.
-
-Text:
-{text}
-"""
-    return groq_chat(prompt, max_tokens=300)
+def extract_keyphrases(text, topk=10):
+    kw = yake.KeywordExtractor(lan="en", n=3, top=topk)
+    return [k[0] for k in kw.extract_keywords(text)]
 
 
-# -----------------------------
-# 2. KEYPHRASE EXTRACTION
-# -----------------------------
-def extract_keyphrases(text: str, topk: int = 10):
-    kw_extractor = yake.KeywordExtractor(lan="en", n=2, top=topk)
-    keywords = kw_extractor.extract_keywords(text)
-    return [k[0] for k in keywords]
+def get_sentiment(text):
+    global _sentiment
+    if _sentiment is None:
+        _sentiment = pipeline("sentiment-analysis")
+
+    paras = [p.strip() for p in text.split("\n") if p.strip()][:12]
+    res = _sentiment(paras)
+
+    pos = sum(1 for r in res if r['label'] == 'POSITIVE')
+    neg = sum(1 for r in res if r['label'] == 'NEGATIVE')
+
+    return {"positive": pos, "negative": neg, "detailed": res}
 
 
-# -----------------------------
-# 3. SENTIMENT ANALYSIS
-# -----------------------------
-def get_sentiment(text: str):
-    prompt = f"""
-Analyze sentiment of this meeting transcript.
-Return results in JSON format:
-- positive_segments
-- negative_segments
-- neutral_segments
-- overall_sentiment ("positive" / "negative" / "neutral")
+def cluster_segments(segments, n_clusters=3):
+    global _embedding
+    if _embedding is None:
+        _embedding = SentenceTransformer("all-MiniLM-L6-v2")
 
-Text:
-{text}
-"""
-    result = groq_chat(prompt, max_tokens=300)
-    return result  # LLM returns clean JSON or natural text
+    emb = _embedding.encode(segments)
+
+    k = min(n_clusters, len(segments))
+    km = KMeans(n_clusters=k, random_state=42).fit(emb)
+
+    clusters = {i: [] for i in range(k)}
+    for idx, label in enumerate(km.labels_):
+        clusters[label].append(segments[idx])
+
+    return clusters
 
 
-# -----------------------------
-# 4. TOPIC CLUSTERING (LLM-based)
-# -----------------------------
-def cluster_segments(segment_texts, n_clusters: int = 3):
-    prompt = f"""
-Cluster the following meeting segments into {n_clusters} topics.
-Return output as a JSON dictionary where keys are cluster numbers
-and values are lists of segments.
+def generate_resume_bullets(summary, n=5):
+    global _generator
+    if _generator is None:
+        _generator = pipeline("text2text-generation", model="google/flan-t5-small")
 
-Segments:
-{segment_texts}
-"""
-    result = groq_chat(prompt, max_tokens=400)
-    return result  # returns JSON-like clusters
+    prompt = f"Generate {n} resume bullets from this summary:\n{summary}"
 
+    out = _generator(prompt, max_length=256, do_sample=False)[0]["generated_text"]
 
-# -----------------------------
-# 5. RESUME BULLET GENERATION
-# -----------------------------
-def generate_resume_bullets(summary_text: str, n: int = 5):
-    prompt = f"""
-Generate {n} strong, concise resume bullets from this meeting summary.
-
-Requirements:
-- Start each bullet with an action verb.
-- Use measurable outcomes where possible.
-- Keep each bullet one line.
-- Professional tone.
-
-Summary:
-{summary_text}
-"""
-    output = groq_chat(prompt, max_tokens=300)
-
-    bullets = [b.strip("-• ").strip() for b in output.split("\n") if b.strip()]
+    bullets = [b.strip("-• ").strip() for b in out.split("\n") if b.strip()]
     return bullets[:n]
