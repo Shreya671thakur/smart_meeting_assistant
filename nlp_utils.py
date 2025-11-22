@@ -1,119 +1,108 @@
-from transformers import pipeline
-from sentence_transformers import SentenceTransformer
-from sklearn.cluster import KMeans
+import requests
+import os
 import yake
 import numpy as np
 
-# load pipelines lazily
-_summarizer = None
-_sentiment = None
-_embedding_model = None
+
+# -----------------------------
+# Helper: Groq LLM call
+# -----------------------------
+def groq_chat(prompt, max_tokens=400):
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {os.getenv('GROQ_API_KEY')}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": "llama-3.1-8b-instant",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "temperature": 0.3
+    }
+
+    response = requests.post(url, json=payload, headers=headers)
+    if response.status_code != 200:
+        raise Exception("Groq LLM error: " + response.text)
+
+    return response.json()["choices"][0]["message"]["content"]
 
 
-def get_summarizer():
-    global _summarizer
-    if _summarizer is None:
-        _summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
-    return _summarizer
-
-
-def get_sentiment_pipeline():
-    global _sentiment
-    if _sentiment is None:
-        _sentiment = pipeline("sentiment-analysis")
-    return _sentiment
-
-
-def get_embedding_model():
-    global _embedding_model
-    if _embedding_model is None:
-        _embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-    return _embedding_model
-
-
+# -----------------------------
+# 1. SUMMARIZATION
+# -----------------------------
 def summarize_text(text: str, max_length: int = 150):
-    summarizer = get_summarizer()
+    prompt = f"""
+Summarize the following meeting text in {max_length} words.
+Focus on decisions, action items, and key discussion points.
 
-    # short text directly
-    if len(text) < 1000:
-        out = summarizer(
-            text,
-            max_length=max_length,
-            min_length=30,
-            do_sample=False
-        )
-        return out[0]['summary_text']
-
-    # long text → chunking
-    chunk_size = 900
-    chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
-
-    summaries = [
-        summarizer(c, max_length=100, min_length=20, do_sample=False)[0]['summary_text']
-        for c in chunks
-    ]
-
-    merged = "\n".join(summaries)
-    final = summarizer(
-        merged,
-        max_length=max_length,
-        min_length=30,
-        do_sample=False
-    )[0]['summary_text']
-
-    return final
+Text:
+{text}
+"""
+    return groq_chat(prompt, max_tokens=300)
 
 
+# -----------------------------
+# 2. KEYPHRASE EXTRACTION
+# -----------------------------
 def extract_keyphrases(text: str, topk: int = 10):
-    kw_extractor = yake.KeywordExtractor(lan="en", n=3, top=topk)
+    kw_extractor = yake.KeywordExtractor(lan="en", n=2, top=topk)
     keywords = kw_extractor.extract_keywords(text)
     return [k[0] for k in keywords]
 
 
+# -----------------------------
+# 3. SENTIMENT ANALYSIS
+# -----------------------------
 def get_sentiment(text: str):
-    pipeline_s = get_sentiment_pipeline()
+    prompt = f"""
+Analyze sentiment of this meeting transcript.
+Return results in JSON format:
+- positive_segments
+- negative_segments
+- neutral_segments
+- overall_sentiment ("positive" / "negative" / "neutral")
 
-    # split by paragraphs
-    paras = [p.strip() for p in text.split('\n\n') if p.strip()]
-    if not paras:
-        paras = [text]
-
-    results = pipeline_s(paras[:12])  # limit heavy input
-
-    pos = sum(1 for r in results if r['label'].lower().startswith('pos'))
-    neg = sum(1 for r in results if r['label'].lower().startswith('neg'))
-
-    return {
-        'positive_segments': pos,
-        'negative_segments': neg,
-        'detailed': results
-    }
+Text:
+{text}
+"""
+    result = groq_chat(prompt, max_tokens=300)
+    return result  # LLM returns clean JSON or natural text
 
 
+# -----------------------------
+# 4. TOPIC CLUSTERING (LLM-based)
+# -----------------------------
 def cluster_segments(segment_texts, n_clusters: int = 3):
-    model = get_embedding_model()
-    emb = model.encode(segment_texts)
+    prompt = f"""
+Cluster the following meeting segments into {n_clusters} topics.
+Return output as a JSON dictionary where keys are cluster numbers
+and values are lists of segments.
 
-    k = min(n_clusters, max(1, len(segment_texts)))
-    km = KMeans(n_clusters=k, random_state=42).fit(emb)
-
-    clusters = {i: [] for i in range(k)}
-    for idx, label in enumerate(km.labels_):
-        clusters[label].append(segment_texts[idx])
-
-    return clusters
+Segments:
+{segment_texts}
+"""
+    result = groq_chat(prompt, max_tokens=400)
+    return result  # returns JSON-like clusters
 
 
+# -----------------------------
+# 5. RESUME BULLET GENERATION
+# -----------------------------
 def generate_resume_bullets(summary_text: str, n: int = 5):
-    generator = pipeline('text2text-generation', model='google/flan-t5-small')
+    prompt = f"""
+Generate {n} strong, concise resume bullets from this meeting summary.
 
-    prompt = (
-        f"Extract {n} concise resume bullets from the following meeting summary. "
-        f"Use action verbs, measurable outcomes, and professional tone.\n\n"
-        f"{summary_text}"
-    )
+Requirements:
+- Start each bullet with an action verb.
+- Use measurable outcomes where possible.
+- Keep each bullet one line.
+- Professional tone.
 
-    out = generator(prompt, max_length=250, do_sample=False)[0]['generated_text']
+Summary:
+{summary_text}
+"""
+    output = groq_chat(prompt, max_tokens=300)
 
-    bullets = [b.strip("-• ").strip() for b in out.split('\n') if b.strip()]
+    bullets = [b.strip("-• ").strip() for b in output.split("\n") if b.strip()]
     return bullets[:n]
