@@ -1,50 +1,32 @@
-import requests
-import os
+from faster_whisper import WhisperModel
 from pydub import AudioSegment
-import tempfile
+import os
 
+model = WhisperModel("base", device="cpu", compute_type="int8")
 
 def transcribe_audio_file(path: str):
-    """
-    Transcribes an audio file using Groq Whisper API.
-    Returns:
-        text (str), segments (list of dict with start, end, text)
-    """
-
-    # Convert to WAV 16k (Groq Whisper prefers clean audio)
     audio = AudioSegment.from_file(path)
-    wav_path = path.rsplit('.', 1)[0] + "_converted.wav"
+    wav_path = path.rsplit(".", 1)[0] + "_tmp.wav"
     audio = audio.set_frame_rate(16000).set_channels(1)
-    audio.export(wav_path, format="wav")
+    audio.export(wav_path, format='wav')
 
-    # Groq API endpoint
-    url = "https://api.groq.com/openai/v1/audio/transcriptions"
-    headers = {
-        "Authorization": f"Bearer {os.getenv('GROQ_API_KEY')}"
-    }
+    segments, info = model.transcribe(wav_path)
 
-    with open(wav_path, "rb") as f:
-        files = {"file": f}
-        data = {"model": "whisper-large-v3"}
+    all_text = ""
+    normalized_segments = []
 
-        response = requests.post(url, headers=headers, files=files, data=data)
+    for seg in segments:
+        txt = seg.text.strip()
+        all_text += txt + " "
+        normalized_segments.append({
+            "start": seg.start,
+            "end": seg.end,
+            "text": txt
+        })
 
-    # Cleanup
     try:
         os.remove(wav_path)
     except:
         pass
 
-    if response.status_code != 200:
-        raise Exception("Groq API Error: " + response.text)
-
-    resp = response.json()
-    text = resp.get("text", "")
-
-    # Groq Whisper does NOT return segments → create simple pseudo segments
-    segments = [
-        {"start": 0, "end": 0, "text": p}
-        for p in text.split(". ") if p.strip()
-    ]
-
-    return text, segments
+    return all_text.strip(), normalized_segments
