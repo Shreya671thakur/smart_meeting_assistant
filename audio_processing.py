@@ -1,42 +1,50 @@
-import whisper
-from pydub import AudioSegment
+import requests
 import os
+from pydub import AudioSegment
+import tempfile
 
-model = whisper.load_model("base")  
-# change to small/medium for better accuracy if you have RAM
 
 def transcribe_audio_file(path: str):
     """
-    Transcribes an audio file and returns full text and segments.
+    Transcribes an audio file using Groq Whisper API.
     Returns:
         text (str), segments (list of dict with start, end, text)
     """
-    
-    # convert to wav 16k if needed
+
+    # Convert to WAV 16k (Groq Whisper prefers clean audio)
     audio = AudioSegment.from_file(path)
     wav_path = path.rsplit('.', 1)[0] + "_converted.wav"
     audio = audio.set_frame_rate(16000).set_channels(1)
-    audio.export(wav_path, format='wav')
+    audio.export(wav_path, format="wav")
 
-    result = model.transcribe(wav_path, verbose=False)
-    text = result.get('text', '')
+    # Groq API endpoint
+    url = "https://api.groq.com/openai/v1/audio/transcriptions"
+    headers = {
+        "Authorization": f"Bearer {os.getenv('GROQ_API_KEY')}"
+    }
 
-    # Whisper returns segments with timestamps
-    segments = result.get('segments', [])
+    with open(wav_path, "rb") as f:
+        files = {"file": f}
+        data = {"model": "whisper-large-v3"}
 
-    # normalize segments to our preferred format
-    norm_segments = []
-    for seg in segments:
-        norm_segments.append({
-            'start': seg['start'],
-            'end': seg['end'],
-            'text': seg['text']
-        })
+        response = requests.post(url, headers=headers, files=files, data=data)
 
-    # cleanup temp file
+    # Cleanup
     try:
         os.remove(wav_path)
-    except Exception:
+    except:
         pass
 
-    return text, norm_segments
+    if response.status_code != 200:
+        raise Exception("Groq API Error: " + response.text)
+
+    resp = response.json()
+    text = resp.get("text", "")
+
+    # Groq Whisper does NOT return segments → create simple pseudo segments
+    segments = [
+        {"start": 0, "end": 0, "text": p}
+        for p in text.split(". ") if p.strip()
+    ]
+
+    return text, segments
