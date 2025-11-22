@@ -1,3 +1,6 @@
+#click here to view my app
+https://smartmeetingassistant-pmfy6brtymsy6jwpfhwqcy.streamlit.app/
+
 # example: use vosk
 from vosk import Model, KaldiRecognizer
 import wave
@@ -18,3 +21,4 @@ while True:
 
 # after loop ends
 results.append(rec.FinalResult())
+
