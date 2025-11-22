@@ -1,32 +1,16 @@
-from faster_whisper import WhisperModel
-from pydub import AudioSegment
+import whisper
 import os
+import subprocess
 
-model = WhisperModel("base", device="cpu", compute_type="int8")
+model = whisper.load_model("base")
 
-def transcribe_audio_file(path: str):
-    audio = AudioSegment.from_file(path)
-    wav_path = path.rsplit(".", 1)[0] + "_tmp.wav"
-    audio = audio.set_frame_rate(16000).set_channels(1)
-    audio.export(wav_path, format='wav')
+def transcribe_audio_file(file_path):
+    # Ensure ffmpeg can read the file
+    output_wav = "temp.wav"
+    subprocess.run([
+        "ffmpeg", "-i", file_path, "-ar", "16000", "-ac", "1", output_wav, "-y"
+    ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-    segments, info = model.transcribe(wav_path)
-
-    all_text = ""
-    normalized_segments = []
-
-    for seg in segments:
-        txt = seg.text.strip()
-        all_text += txt + " "
-        normalized_segments.append({
-            "start": seg.start,
-            "end": seg.end,
-            "text": txt
-        })
-
-    try:
-        os.remove(wav_path)
-    except:
-        pass
-
-    return all_text.strip(), normalized_segments
+    result = model.transcribe(output_wav)
+    os.remove(output_wav)
+    return result["text"]
